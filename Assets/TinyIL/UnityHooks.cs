@@ -1,0 +1,160 @@
+#if UNITY_EDITOR
+
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Threading;
+using UnityEngine;
+using UnityEditor;
+using Mono.Cecil;
+using UnityEditor.Compilation;
+
+namespace TinyIL {
+    static internal class UnityHooks {
+
+        #region Compilation
+
+        static internal bool ProcessAssembly(string assemblyPath, string sourceDirectory, string[] searchDirs) {
+            try {
+                using (var asmDef = AssemblyDefinition.ReadAssembly(assemblyPath, new ReaderParameters() { ReadWrite = true })) {
+                    int modifiedCount = 0;
+
+                    TinyILParser.AddAssemblySearchDirectories(asmDef, searchDirs);
+
+                    foreach (var type in asmDef.MainModule.Types) {
+                        if (type.FullName == "<Module>" || !type.HasMethods) {
+                            continue;
+                        }
+
+                        foreach (var method in type.Methods) {
+                            if (CompileMethod(method)) {
+                                //Debug.LogFormat("[TinyIL] Method '{0}' modified", method.FullName);
+                                modifiedCount++;
+                            }
+                        }
+                    }
+
+                    if (modifiedCount > 0) {
+                        try {
+                            asmDef.Write();
+                            Debug.LogFormat("[TinyIL] Assembly '{0}' modifications to {1} methods written to disk", assemblyPath, modifiedCount); 
+                        } catch (Exception e) {
+                            Debug.LogErrorFormat("[TinyIL] Failed to write modifications to assembly '{0}'", assemblyPath);
+                            Debug.LogException(e);
+                        }
+                        return true;
+                    }
+
+                    //Debug.LogFormat("[TinyIL] Assembly '{0}' left unmodified", assemblyPath);
+                    return false;
+                }
+            } catch(Exception e) {
+                Debug.LogErrorFormat("[TinyIL] Failed to process assembly '{0}'", assemblyPath);
+                Debug.LogException(e);
+                return false;
+            }
+        }
+
+        static internal bool CompileMethod(MethodDefinition method) {
+            bool processed = IntrinsicILHandler.Process(method);
+            return processed;
+        }
+
+        #endregion // Compilation
+
+        #region Hooks
+
+        static private readonly Queue<string> s_AssemblyProcessQueue = new Queue<string>(32);
+        static private object s_CurrentCompilationToken = null;
+
+        [InitializeOnLoadMethod]
+        static private void InitializeHooks() {
+            CompilationPipeline.compilationStarted -= OnCompilationStarted;
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
+
+            CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
+            CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
+
+            CompilationPipeline.compilationFinished -= OnCompilationFinished;
+            CompilationPipeline.compilationFinished += OnCompilationFinished;
+
+            if (!SessionState.GetBool("TinyIL.Initialized", false)) {
+                ProcessAll();
+                SessionState.SetBool("TinyIL.Initialized", true);
+            }
+        }
+
+        static private void OnCompilationStarted(object token) {
+            s_CurrentCompilationToken = token;
+            s_AssemblyProcessQueue.Clear();
+        }
+
+        static private void OnAssemblyCompilationFinished(string path, CompilerMessage[] messages) {
+            if (s_CurrentCompilationToken == null) {
+                return;
+            }
+
+            foreach(var msg in messages) {
+                if (msg.type == CompilerMessageType.Error) {
+                    return;
+                }
+            }
+
+            if (Path.GetFileName(path) == "TinyIL.dll") {
+                s_CurrentCompilationToken = null;
+                SessionState.EraseBool("TinyIL.Initialized");
+                SessionState.SetBool("TinyIL.ReimportAll", true);
+                //Debug.Log("[TinyIL] Change to TinyIL import DLL detected");
+                return; 
+            }
+
+            s_AssemblyProcessQueue.Enqueue(path);
+        }
+
+        static private void OnCompilationFinished(object token) {
+            if (s_CurrentCompilationToken == token) {
+                s_CurrentCompilationToken = null; 
+
+                if (s_AssemblyProcessQueue.Count > 0) {
+                    Thread.Sleep(250); // ensure file locks have been dealt with
+                    string[] lookupHelper = GetSystemAssemblyDirectories();
+                    while (s_AssemblyProcessQueue.Count > 0) {
+                        string asmPath = s_AssemblyProcessQueue.Dequeue();
+                        ProcessAssembly(asmPath, null, lookupHelper);
+                    }
+                }
+            } else if (SessionState.GetBool("TinyIL.ReimportAll", false)) {
+                SessionState.EraseBool("TinyIL.ReimportAll");
+                Thread.Sleep(250);
+                ProcessAll(); 
+            }
+        }
+
+        static private string[] GetSystemAssemblyDirectories() {
+            HashSet<string> allDirs = new HashSet<string>();
+            foreach (var precomp in CompilationPipeline.GetPrecompiledAssemblyPaths(CompilationPipeline.PrecompiledAssemblySources.All)) {
+                allDirs.Add(Path.GetDirectoryName(precomp));
+            }
+            var apiCompatLevel = PlayerSettings.GetApiCompatibilityLevel(BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
+            foreach (var sys in CompilationPipeline.GetSystemAssemblyDirectories(apiCompatLevel)) {
+                allDirs.Add(Path.GetDirectoryName(sys));
+            }
+            string[] final = new string[allDirs.Count];
+            allDirs.CopyTo(final, 0);
+            return final;
+        }
+
+        static private void ProcessAll() {
+            string[] lookupHelper = GetSystemAssemblyDirectories();
+            foreach (var asm in CompilationPipeline.GetAssemblies()) {
+                if (File.Exists(asm.outputPath)) {
+                    ProcessAssembly(asm.outputPath, null, lookupHelper);
+                }
+            }
+        }
+
+        #endregion // Hooks
+    }
+}
+
+#endif // UNITY_EDITOR
