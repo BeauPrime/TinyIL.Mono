@@ -21,7 +21,12 @@ namespace TinyIL {
 
                     TinyILParser.AddAssemblySearchDirectories(asmDef, searchDirs);
 
-                    foreach (var type in asmDef.MainModule.Types) {
+                    HashSet<TypeDefinition> processed = new HashSet<TypeDefinition>();
+                    Stack<TypeDefinition> types = new Stack<TypeDefinition>(asmDef.MainModule.Types);
+                    while(types.Count > 0) {
+                        var type = types.Pop();
+                        processed.Add(type);
+
                         if (type.FullName == "<Module>" || !type.HasMethods) {
                             continue;
                         }
@@ -32,11 +37,19 @@ namespace TinyIL {
                                 modifiedCount++;
                             }
                         }
+
+                        if (type.HasNestedTypes) {
+                            foreach(var nested in type.NestedTypes) {
+                                if (!processed.Contains(nested)) {
+                                    types.Push(nested);
+                                }
+                            }
+                        }
                     }
 
                     if (modifiedCount > 0) {
                         try {
-                            asmDef.Write();
+                            asmDef.Write(); 
                             Debug.LogFormat("[TinyIL] Assembly '{0}' modifications to {1} methods written to disk", assemblyPath, modifiedCount); 
                         } catch (Exception e) {
                             Debug.LogErrorFormat("[TinyIL] Failed to write modifications to assembly '{0}'", assemblyPath);

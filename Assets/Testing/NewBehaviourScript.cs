@@ -30,6 +30,15 @@ public class NewBehaviourScript : MonoBehaviour
         Unloading
     }
 
+    private struct NestedTest
+    {
+        [IntrinsicIL("ldarg.0; ret")]
+        static public int CheckNested(int a)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
     [IntrinsicIL("ldarga.s scene; call UnityEngine.SceneManagement.Scene::get_loadingState(); conv.i4; ret;")]
     static private SceneLoadState GetLoadingState(Scene scene) {  
         throw new NotImplementedException();  
