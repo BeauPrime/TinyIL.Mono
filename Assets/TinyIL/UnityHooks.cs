@@ -92,14 +92,18 @@ namespace TinyIL {
             CompilationPipeline.compilationFinished += OnCompilationFinished;
 
             if (!SessionState.GetBool("TinyIL.Initialized", false)) {
-                ProcessAll();
+                ProcessAll(AssembliesType.Editor);
                 SessionState.SetBool("TinyIL.Initialized", true);
             }
         }
 
         static private void OnCompilationStarted(object token) {
-            s_CurrentCompilationToken = token;
-            s_AssemblyProcessQueue.Clear();
+            if (BuildPipeline.isBuildingPlayer) {
+                SessionState.SetBool("TinyIL.ReimportAll", true);
+            } else {
+                s_CurrentCompilationToken = token;
+                s_AssemblyProcessQueue.Clear();
+            }
         }
 
         static private void OnAssemblyCompilationFinished(string path, CompilerMessage[] messages) {
@@ -139,7 +143,7 @@ namespace TinyIL {
             } else if (SessionState.GetBool("TinyIL.ReimportAll", false)) {
                 SessionState.EraseBool("TinyIL.ReimportAll");
                 Thread.Sleep(250);
-                ProcessAll(); 
+                ProcessAll(BuildPipeline.isBuildingPlayer ? AssembliesType.Player : AssembliesType.Editor);
             }
         }
 
@@ -157,9 +161,9 @@ namespace TinyIL {
             return final;
         }
 
-        static private void ProcessAll() {
+        static private void ProcessAll(AssembliesType asmType) {
             string[] lookupHelper = GetSystemAssemblyDirectories();
-            foreach (var asm in CompilationPipeline.GetAssemblies()) {
+            foreach (var asm in CompilationPipeline.GetAssemblies(asmType)) {
                 if (File.Exists(asm.outputPath)) {
                     ProcessAssembly(asm.outputPath, null, lookupHelper);
                 }
