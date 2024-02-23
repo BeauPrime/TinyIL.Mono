@@ -17,7 +17,7 @@ public class NewBehaviourScript : MonoBehaviour
         Debug.Log(ToInt(loadState));
     }
 
-    // Update is called once per frame
+    // Update is called once per frame 
     void Update()
     {
         
@@ -38,6 +38,10 @@ public class NewBehaviourScript : MonoBehaviour
             throw new NotImplementedException();
         }
     }
+
+    [IntrinsicIL("#asmref System.Collections; ret")]
+    static private void ImportAssembly() {
+    } 
 
     [IntrinsicIL("ldarga.s scene; call UnityEngine.SceneManagement.Scene::get_loadingState(); conv.i4; ret;")]
     static private SceneLoadState GetLoadingState(Scene scene) {  

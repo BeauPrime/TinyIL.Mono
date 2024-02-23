@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Text;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using UnityEngine;
 
 namespace TinyIL {
     static public class TinyILParser {
@@ -40,6 +41,7 @@ namespace TinyIL {
             internal readonly List<string> VarNames;
             internal readonly List<LabelDefinition> Labels;
             internal readonly List<LateBranchResolver> Branches;
+            internal readonly List<ModuleDefinition> Modules;
 
             public MethodContext(MethodDefinition definition) {
                 Definition = definition;
@@ -48,6 +50,8 @@ namespace TinyIL {
                 VarNames = new List<string>(8);
                 Labels = new List<LabelDefinition>(8);
                 Branches = new List<LateBranchResolver>(8);
+                Modules = new List<ModuleDefinition>(8);
+                Modules.Add(Definition.Module);
             }
         }
 
@@ -112,6 +116,11 @@ namespace TinyIL {
 
                 TypeReference typeRef = FindType(context, type);
                 DefineVariable(context, name, typeRef);
+            } else if (op == "#asmref") {
+                if (string.IsNullOrEmpty(operand)) {
+                    throw new InvalidILException("#asmref must have an assembly name");
+                }
+                ImportAssembly(context, operand);
             } else if (NoOperandCommands.TryGetValue(op, out OpCode opcode)) {
                 if (!string.IsNullOrEmpty(operand)) {
                     throw new InvalidILException("opcode '{0}' does not support operands", op);
@@ -245,6 +254,30 @@ namespace TinyIL {
 
         #endregion // Definitions
 
+        #region Importing
+
+        static private void ImportAssembly(MethodContext context, string assemblyName) {
+            if (string.IsNullOrEmpty(assemblyName)) {
+                throw new ArgumentNullException("assemblyName");
+            }
+
+            ModuleDefinition rootModule = context.Definition.Module;
+            AssemblyDefinition def = rootModule.AssemblyResolver.Resolve(new AssemblyNameReference(assemblyName, null));
+            if (def != null) {
+                foreach(var module in def.Modules) {
+                    if (!context.Modules.Contains(module)) {
+                        context.Modules.Add(def.MainModule);
+                        // Debug.LogFormat("[TinyIL] Imported module '{0}'", module.FileName);
+                        rootModule.ModuleReferences.Add(module);
+                    }
+                }
+            } else {
+                throw new InvalidILException("Could not resolve assembly '{0}'", assemblyName);
+            }
+        }
+
+        #endregion // Importing
+
         #region Lookups
 
         static private TypeReference FindType(MethodContext context, string typeName) {
@@ -355,7 +388,14 @@ namespace TinyIL {
                 }
             }
 
-            context.Definition.Module.TryGetTypeReference(typeName, out typeRef);
+            typeRef = null;
+
+            foreach (var module in context.Modules) {
+                if (module.TryGetTypeReference(typeName, out typeRef)) {
+                    break;
+                }
+            }
+
             if (typeRef == null) {
                 throw new InvalidILException("Unable to locate type with name '{0}'", typeName);
             }

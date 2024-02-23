@@ -92,8 +92,11 @@ namespace TinyIL {
             CompilationPipeline.compilationFinished += OnCompilationFinished;
 
             if (!SessionState.GetBool("TinyIL.Initialized", false)) {
-                ProcessAll(AssembliesType.Editor);
+                Thread.Sleep(250);
                 SessionState.SetBool("TinyIL.Initialized", true);
+                if (ProcessAll(AssembliesType.Editor)) {
+                    AssetDatabase.Refresh();
+                }
             }
         }
 
@@ -119,6 +122,7 @@ namespace TinyIL {
 
             if (Path.GetFileName(path) == "TinyIL.dll") {
                 s_CurrentCompilationToken = null;
+                s_AssemblyProcessQueue.Clear();
                 SessionState.EraseBool("TinyIL.Initialized");
                 SessionState.SetBool("TinyIL.ReimportAll", true);
                 //Debug.Log("[TinyIL] Change to TinyIL import DLL detected");
@@ -154,20 +158,27 @@ namespace TinyIL {
             }
             var apiCompatLevel = PlayerSettings.GetApiCompatibilityLevel(BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
             foreach (var sys in CompilationPipeline.GetSystemAssemblyDirectories(apiCompatLevel)) {
-                allDirs.Add(Path.GetDirectoryName(sys));
+                allDirs.Add(sys);
             }
+
+            //foreach(var dir in allDirs) {
+            //    Debug.LogFormat("[TinyIL] Found assembly directory '{0}'", dir);
+            //}
+
             string[] final = new string[allDirs.Count];
             allDirs.CopyTo(final, 0);
             return final;
         }
 
-        static private void ProcessAll(AssembliesType asmType) {
+        static private bool ProcessAll(AssembliesType asmType) {
+            bool anyModified = false;
             string[] lookupHelper = GetSystemAssemblyDirectories();
             foreach (var asm in CompilationPipeline.GetAssemblies(asmType)) {
                 if (File.Exists(asm.outputPath)) {
-                    ProcessAssembly(asm.outputPath, null, lookupHelper);
+                    anyModified |= ProcessAssembly(asm.outputPath, null, lookupHelper);
                 }
             }
+            return anyModified;
         }
 
         #endregion // Hooks
