@@ -26,16 +26,16 @@ namespace TinyIL {
         /// <summary>
         /// Handles intrinsic IL substitution.
         /// </summary>
-        static internal bool Process(MethodDefinition method) {
+        static internal bool Process(MethodDefinition method, ref PatchFileCache patchCache) {
 
-            if (!TinyILParser.FindCustomAttribute(method, "IntrinsicILAttribute", out var attr)) {
-                return false;
+            if (TinyILParser.FindCustomAttribute(method, "IntrinsicILAttribute", out var intrinsicAttr)) {
+                string ilStr = intrinsicAttr.ConstructorArguments[0].Value.ToString();
+                method.CustomAttributes.Remove(intrinsicAttr);
+                TinyILParser.ReplaceWithIL(method, ilStr);
+                return true;
             }
 
-            string ilStr = attr.ConstructorArguments[0].Value.ToString();
-            method.CustomAttributes.Remove(attr);
-            TinyILParser.ReplaceWithIL(method, ilStr);
-            return true;
+            return false;
         }
     }
 

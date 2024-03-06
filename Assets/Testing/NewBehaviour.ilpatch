@@ -1,0 +1,55 @@
+== FNV_HASH
+
+// 0=ptr, 1=len
+
+// check for null/empty  
+ldarg.1
+conv.u4
+brfalse.s EARLY_EXIT
+
+// variables
+#var ptr char*
+#var length int32
+#var hash uint32
+
+ldarg.0
+stloc.0
+
+ldarg.1
+stloc.1
+
+ldc.i4 -2128831035
+stloc.2
+
+LOOP:
+ldloc.0
+dup
+ldind.i2
+ldloc.2
+xor
+ldc.i4 16777619
+conv.u4
+mul
+stloc.2
+
+// increment ptr
+ldc.i4.2
+add
+stloc.0
+
+ldloc.1 
+ldc.i4.1
+sub
+dup
+stloc.1
+
+brtrue.s LOOP
+
+ldloc.2
+br.s REAL_EXIT
+
+EARLY_EXIT:
+ldc.i4.0
+
+REAL_EXIT:
+ret

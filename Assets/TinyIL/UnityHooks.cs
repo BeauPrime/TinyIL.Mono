@@ -8,49 +8,48 @@ using UnityEngine;
 using UnityEditor;
 using Mono.Cecil;
 using UnityEditor.Compilation;
+using UnityEditor.Build;
+using UnityEditor.Build.Reporting;
 
 namespace TinyIL {
-    static internal class UnityHooks {
+    static public class TinyILUnity {
+
+        #region Method processors
+
+        #endregion // Method processors
+
+        #region Flags
+
+        static private bool IsInitialized {
+            get { return SessionState.GetBool("TinyIL.Initialized", false); }
+            set { SessionState.SetBool("TinyIL.Initialized", value); }
+        }
+
+        static private bool ShouldProcessAll {
+            get { return SessionState.GetBool("TinyIL.ProcessAll", false); }
+            set { SessionState.SetBool("TinyIL.ProcessAll", value); }
+        }
+
+        static private bool ShouldForceRecompilation {
+            get { return SessionState.GetBool("TinyIL.RecompileAll", false); }
+            set { SessionState.SetBool("TinyIL.RecompileAll", value); }
+        }
+
+        #endregion // Flags
 
         #region Compilation
 
         static internal bool ProcessAssembly(string assemblyPath, string sourceDirectory, string[] searchDirs) {
             try {
-                using (var asmDef = AssemblyDefinition.ReadAssembly(assemblyPath, new ReaderParameters() { ReadWrite = true })) {
-                    int modifiedCount = 0;
-
+                using (var asmDef = TinyILParser.OpenReadWrite(assemblyPath, out bool debugSymbols)) {
                     TinyILParser.AddAssemblySearchDirectories(asmDef, searchDirs);
+                    PatchFileCache patchCache = new PatchFileCache(sourceDirectory);
 
-                    HashSet<TypeDefinition> processed = new HashSet<TypeDefinition>();
-                    Stack<TypeDefinition> types = new Stack<TypeDefinition>(asmDef.MainModule.Types);
-                    while(types.Count > 0) {
-                        var type = types.Pop();
-                        processed.Add(type);
-
-                        if (type.FullName == "<Module>" || !type.HasMethods) {
-                            continue;
-                        }
-
-                        foreach (var method in type.Methods) {
-                            if (CompileMethod(method)) {
-                                //Debug.LogFormat("[TinyIL] Method '{0}' modified", method.FullName);
-                                modifiedCount++;
-                            }
-                        }
-
-                        if (type.HasNestedTypes) {
-                            foreach(var nested in type.NestedTypes) {
-                                if (!processed.Contains(nested)) {
-                                    types.Push(nested);
-                                }
-                            }
-                        }
-                    }
-
+                    int modifiedCount = TinyILParser.TraverseMethodsAndModify(asmDef, null, CompileMethod, ref patchCache);
                     if (modifiedCount > 0) {
                         try {
-                            asmDef.Write(); 
-                            Debug.LogFormat("[TinyIL] Assembly '{0}' modifications to {1} methods written to disk", assemblyPath, modifiedCount); 
+                            asmDef.Write(new WriterParameters() { WriteSymbols = debugSymbols });
+                            Debug.LogFormat("[TinyIL] Assembly '{0}' modifications to {1} methods written to disk", assemblyPath, modifiedCount);
                         } catch (Exception e) {
                             Debug.LogErrorFormat("[TinyIL] Failed to write modifications to assembly '{0}'", assemblyPath);
                             Debug.LogException(e);
@@ -58,7 +57,7 @@ namespace TinyIL {
                         return true;
                     }
 
-                    //Debug.LogFormat("[TinyIL] Assembly '{0}' left unmodified", assemblyPath);
+                    Console.WriteLine("[TinyIL] Assembly '{0}' left unmodified", assemblyPath);
                     return false;
                 }
             } catch(Exception e) {
@@ -68,9 +67,18 @@ namespace TinyIL {
             }
         }
 
-        static internal bool CompileMethod(MethodDefinition method) {
-            bool processed = IntrinsicILHandler.Process(method);
-            return processed;
+        static internal bool CompileMethod(MethodDefinition method, ref PatchFileCache patchCache) {
+            try {
+                bool processed = IntrinsicILHandler.Process(method, ref patchCache);
+                if (!processed) {
+                    processed = ExternalILHandler.Process(method, ref patchCache);
+                }
+                return processed;
+            } catch(Exception e) {
+                Debug.LogErrorFormat("[TinyIL] Failed to process method '{0}'", method.FullName);
+                Debug.LogException(e);
+                throw e;
+            }
         }
 
         #endregion // Compilation
@@ -91,18 +99,29 @@ namespace TinyIL {
             CompilationPipeline.compilationFinished -= OnCompilationFinished;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
 
-            if (!SessionState.GetBool("TinyIL.Initialized", false)) {
+            if (!IsInitialized) {
                 Thread.Sleep(250);
-                SessionState.SetBool("TinyIL.Initialized", true);
+                IsInitialized = true;
                 if (ProcessAll(AssembliesType.Editor)) {
                     AssetDatabase.Refresh();
+                }
+
+                string[] extensions = EditorSettings.projectGenerationUserExtensions;
+                if (Array.IndexOf(extensions, "ilpatch") < 0) {
+                    ArrayUtility.Add(ref extensions, "ilpatch");
+                    EditorSettings.projectGenerationUserExtensions = extensions;
+                    Debug.LogFormat("[TinyIL] Registered 'ilpatch' extension");
                 }
             }
         }
 
         static private void OnCompilationStarted(object token) {
+            if (ShouldProcessAll) {
+                return;
+            }
+
             if (BuildPipeline.isBuildingPlayer) {
-                SessionState.SetBool("TinyIL.ReimportAll", true);
+                ShouldProcessAll = true;
             } else {
                 s_CurrentCompilationToken = token;
                 s_AssemblyProcessQueue.Clear();
@@ -120,13 +139,12 @@ namespace TinyIL {
                 }
             }
 
-            if (Path.GetFileName(path) == "TinyIL.dll") {
+            if (Path.GetFileName(path) == "TinyIL.Mono.dll") {
                 s_CurrentCompilationToken = null;
                 s_AssemblyProcessQueue.Clear();
-                SessionState.EraseBool("TinyIL.Initialized");
-                SessionState.SetBool("TinyIL.ReimportAll", true);
-                //Debug.Log("[TinyIL] Change to TinyIL import DLL detected");
-                return; 
+                IsInitialized = false;
+                ShouldProcessAll = true;
+                return;
             }
 
             s_AssemblyProcessQueue.Enqueue(path);
@@ -139,16 +157,28 @@ namespace TinyIL {
                 if (s_AssemblyProcessQueue.Count > 0) {
                     Thread.Sleep(250); // ensure file locks have been dealt with
                     string[] lookupHelper = GetSystemAssemblyDirectories();
+                    var asmMap = GetOutputPathToAsmMap(AssembliesType.Editor);
                     while (s_AssemblyProcessQueue.Count > 0) {
                         string asmPath = s_AssemblyProcessQueue.Dequeue();
-                        ProcessAssembly(asmPath, null, lookupHelper);
+                        Assembly asm = asmMap[asmPath];
+                        string asmDefPath = GetSourcePath(asm.name);
+                        ProcessAssembly(asmPath, asmDefPath, lookupHelper);
                     }
                 }
-            } else if (SessionState.GetBool("TinyIL.ReimportAll", false)) {
-                SessionState.EraseBool("TinyIL.ReimportAll");
+            } else if (ShouldProcessAll) {
+                ShouldProcessAll = false;
                 Thread.Sleep(250);
                 ProcessAll(BuildPipeline.isBuildingPlayer ? AssembliesType.Player : AssembliesType.Editor);
             }
+        }
+
+        static private Dictionary<string, Assembly> GetOutputPathToAsmMap(AssembliesType asmType) {
+            var asms = CompilationPipeline.GetAssemblies(asmType);
+            Dictionary<string, Assembly> asmMap = new Dictionary<string, Assembly>(asms.Length, StringComparer.Ordinal);
+            foreach(var asm in asms) {
+                asmMap.Add(asm.outputPath, asm);
+            }
+            return asmMap;
         }
 
         static private string[] GetSystemAssemblyDirectories() {
@@ -156,12 +186,32 @@ namespace TinyIL {
             foreach (var precomp in CompilationPipeline.GetPrecompiledAssemblyPaths(CompilationPipeline.PrecompiledAssemblySources.All)) {
                 allDirs.Add(Path.GetDirectoryName(precomp));
             }
+
             var apiCompatLevel = PlayerSettings.GetApiCompatibilityLevel(BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
             foreach (var sys in CompilationPipeline.GetSystemAssemblyDirectories(apiCompatLevel)) {
                 allDirs.Add(sys);
             }
 
-            //foreach(var dir in allDirs) {
+            //foreach (var dir in allDirs) {
+            //    Debug.LogFormat("[TinyIL] Found system assembly directory '{0}'", dir);
+            //}
+
+            string[] final = new string[allDirs.Count];
+            allDirs.CopyTo(final, 0);
+            return final;
+        }
+
+        static private string[] GetAssemblyDirectories(Assembly asm, string[] systemDirs) {
+            HashSet<string> allDirs = new HashSet<string>();
+            foreach (var reference in asm.allReferences) {
+                allDirs.Add(Path.GetDirectoryName(reference));
+            }
+
+            foreach (var precomp in systemDirs) {
+                allDirs.Add(precomp);
+            }
+
+            //foreach (var dir in allDirs) {
             //    Debug.LogFormat("[TinyIL] Found assembly directory '{0}'", dir);
             //}
 
@@ -170,18 +220,50 @@ namespace TinyIL {
             return final;
         }
 
+        [MenuItem("Assets/TinyIL/Force Recompilation", priority = 41)]
+        static private void ForceRecompilation() {
+            ShouldProcessAll = true;
+#if UNITY_2021_1_OR_NEWER
+            CompilationPipeline.RequestScriptCompilation(RequestScriptCompilationOptions.CleanBuildCache);
+#else
+            CompilationPipeline.RequestScriptCompilation();
+#endif // 
+        }
+
+        [MenuItem("Assets/TinyIL/Force Recompilation", priority = 41, validate = true)]
+        static private bool ForceRecompilation_Validation() {
+            return !EditorApplication.isCompiling;
+        }
+
         static private bool ProcessAll(AssembliesType asmType) {
             bool anyModified = false;
             string[] lookupHelper = GetSystemAssemblyDirectories();
             foreach (var asm in CompilationPipeline.GetAssemblies(asmType)) {
                 if (File.Exists(asm.outputPath)) {
-                    anyModified |= ProcessAssembly(asm.outputPath, null, lookupHelper);
+                    anyModified |= ProcessAssembly(asm.outputPath, GetSourcePath(asm.name), GetAssemblyDirectories(asm, lookupHelper));
                 }
             }
             return anyModified;
         }
 
-        #endregion // Hooks
+        static private string GetSourcePath(string asmName) {
+            string asmDefPath = CompilationPipeline.GetAssemblyDefinitionFilePathFromAssemblyName(asmName);
+            if (string.IsNullOrEmpty(asmDefPath)) {
+                return "Assets/";
+            }
+
+            return Path.GetDirectoryName(asmName).Replace('\\', '/');
+        }
+
+        //private class PostBuildPlayerDllHook : UnityEditor.Build.IPostBuildPlayerScriptDLLs {
+        //    int IOrderedCallback.callbackOrder { get { return -10; } }
+
+        //    void IPostBuildPlayerScriptDLLs.OnPostBuildPlayerScriptDLLs(BuildReport report) {
+        //        throw new NotImplementedException();
+        //    }
+        //}
+
+#endregion // Hooks
     }
 }
 

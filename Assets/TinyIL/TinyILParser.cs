@@ -2,10 +2,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Pdb;
 using UnityEngine;
+using UnityEngine.XR;
 
 namespace TinyIL {
     static public class TinyILParser {
@@ -17,6 +20,7 @@ namespace TinyIL {
         public class InvalidILException : Exception {
             public InvalidILException(string message) : base(message) { }
             public InvalidILException(string format, params object[] args) : base(string.Format(format, args)) { }
+            public InvalidILException(Exception inner, string format, params object[] args) : base(string.Format(format, args), inner) { }
         }
 
         internal struct LabelDefinition {
@@ -63,10 +67,12 @@ namespace TinyIL {
         /// Replaces the contents of the given method definition with parsed IL.
         /// </summary>
         static public void ReplaceWithIL(MethodDefinition methodDefinition, string ilBlock) {
+            Console.WriteLine("[TinyIL] Preparing to overwrite method '{0}'...", methodDefinition.FullName);
             MethodContext context = new MethodContext(methodDefinition);
             PrepareOverwrite(context);
             ProcessLines(context, ilBlock);
             PostProcess(context);
+            Console.WriteLine("[TinyIL] ...Overwrote method!", methodDefinition.FullName);
         }
 
         /// <summary>
@@ -85,6 +91,11 @@ namespace TinyIL {
         static public void ProcessLine(MethodContext context, string ilLine) {
             ilLine = ilLine.Trim();
 
+            int commentStartIdx = ilLine.IndexOf("//");
+            if (commentStartIdx >= 0) {
+                ilLine = ilLine.Substring(0, commentStartIdx).TrimEnd();
+            }
+
             if (string.IsNullOrEmpty(ilLine)) {
                 return;
             }
@@ -92,15 +103,15 @@ namespace TinyIL {
             string op, operand;
             int spaceIdx = ilLine.IndexOf(' ');
             if (spaceIdx >= 0) {
-                op = ilLine.Substring(0, spaceIdx).Trim();
-                operand = ilLine.Substring(spaceIdx + 1).Trim();
+                op = ilLine.Substring(0, spaceIdx).TrimEnd();
+                operand = ilLine.Substring(spaceIdx + 1).TrimStart();
             } else {
                 op = ilLine;
                 operand = null;
             }
 
             if (operand == null && op.EndsWith(":")) {
-                DefineLabel(context, op.Substring(1));
+                DefineLabel(context, op.Substring(0, op.Length - 1));
             } else if (op == "#var") {
                 if (string.IsNullOrEmpty(operand)) {
                     throw new InvalidILException("#var must be in format [name] [type]");
@@ -140,8 +151,12 @@ namespace TinyIL {
                     Placeholder = nop
                 });
             } else if (OperandCommands.TryGetValue(op, out InstructionGenerator generator)) {
-                Instruction inst = generator(operand, context);
-                context.Processor.Append(inst);
+                try {
+                    Instruction inst = generator(operand, context);
+                    context.Processor.Append(inst);
+                } catch(Exception e) {
+                    throw new InvalidILException(e, "unable to parse '{0}'", ilLine);
+                }
             } else {
                 throw new InvalidILException("Unrecognized or unsupported IL opcode '{0}'", op);
             }
@@ -212,6 +227,7 @@ namespace TinyIL {
         static public void PostProcess(MethodContext context) {
             ResolveBranching(context);
             ValidateReturn(context);
+            context.Definition.DebugInformation.Scope = new ScopeDebugInformation(context.Body.Instructions[0], context.Body.Instructions[context.Body.Instructions.Count - 1]);
         }
 
         #endregion // Cleanup
@@ -280,132 +296,183 @@ namespace TinyIL {
 
         #region Lookups
 
+        #region Type Resolve
+
         static private TypeReference FindType(MethodContext context, string typeName) {
-            // local only to this function
-            TypeReference SearchGenerics(IGenericParameterProvider provider, string name) {
-                if (provider.HasGenericParameters) {
-                    foreach (var param in provider.GenericParameters) {
-                        if (param.Name.Equals(name, StringComparison.Ordinal)) {
-                            return param;
-                        }
-                    }
-                }
-
-                return null;
-            }
-
             if (string.IsNullOrEmpty(typeName)) {
-                throw new ArgumentNullException("typeName");
+                throw new InvalidILException("Empty type name");
             }
 
-            // TODO: Handle pointers
+            int pointerDepth = 0;
+            bool pinned = false;
 
-            TypeReference typeRef;
-
-            switch (typeName) {
-                case "int64": {
-                    return context.Definition.Module.TypeSystem.Int64;
-                }
-                case "int32": {
-                    return context.Definition.Module.TypeSystem.Int32;
-                }
-                case "int16": {
-                    return context.Definition.Module.TypeSystem.Int16;
-                }
-                case "int8": {
-                    return context.Definition.Module.TypeSystem.SByte;
-                }
-                case "uint64": {
-                    return context.Definition.Module.TypeSystem.UInt64;
-                }
-                case "uint32": {
-                    return context.Definition.Module.TypeSystem.UInt32;
-                }
-                case "uint16": {
-                    return context.Definition.Module.TypeSystem.UInt16;
-                }
-                case "uint8": {
-                    return context.Definition.Module.TypeSystem.Byte;
-                }
-                case "bool": {
-                    return context.Definition.Module.TypeSystem.Boolean;
-                }
-                case "float": {
-                    return context.Definition.Module.TypeSystem.Single;
-                }
-                case "double": {
-                    return context.Definition.Module.TypeSystem.Double;
-                }
-                case "string": {
-                    return context.Definition.Module.TypeSystem.String;
-                }
-                case "char": {
-                    return context.Definition.Module.TypeSystem.Char;
-                }
-                case "object": {
-                    return context.Definition.Module.TypeSystem.Object;
-                }
-                case "void": {
-                    return context.Definition.Module.TypeSystem.Void;
-                }
+            int pinnedIdx = typeName.LastIndexOf(" pinned");
+            if (pinnedIdx >= 0) {
+                pinned = true;
+                typeName = typeName.Substring(0, pinnedIdx).TrimEnd();
             }
 
-            if (typeName.StartsWith("!!")) {
+            int end = typeName.Length - 1;
+            while(end >= 0 && typeName[end] == '*') {
+                pointerDepth++;
+                end--;
+            }
+            if (pointerDepth > 0) {
+                typeName = typeName.Substring(0, end + 1);
+            }
+
+            TypeReference typeRef = FindTypeInPrimitives(context.Definition.Module, typeName.ToLower());
+
+            if (typeRef == null && typeName.StartsWith("!!")) {
                 // generic
                 typeName = typeName.Substring(2);
-
-                typeRef = SearchGenerics(context.Definition, typeName);
-                if (typeRef != null) {
-                    return typeRef;
-                }
-
-                TypeDefinition declaringType = context.Definition.DeclaringType;
-                while(declaringType != null && typeRef == null) {
-                    typeRef = SearchGenerics(context.Definition, typeName);
-                    declaringType = declaringType.DeclaringType;
-                }
-
-                if (typeRef == null) {
-                    throw new InvalidILException("Unable to locate generic type with name '{0}'", typeName);
-                }
-
-                return typeRef;
+                typeRef = FindTypeInGenericsWithTraversal(context.Definition, typeName);
             }
 
-            if (typeName.StartsWith("[") && typeName.EndsWith("]")) {
+            if (typeRef == null && typeName.StartsWith("[") && typeName.EndsWith("]")) {
                 typeName = typeName.Substring(1, typeName.Length - 2).Trim();
-                if (typeName.Equals("declaringType", StringComparison.OrdinalIgnoreCase)) {
-                    return context.Definition.DeclaringType;
-                } else {
-                    int spaceIdx = typeName.IndexOf(' ');
-                    string access = typeName.Substring(0, spaceIdx).TrimEnd();
-                    string name = typeName.Substring(spaceIdx + 1).TrimStart();
-                    if (access.Equals("param", StringComparison.OrdinalIgnoreCase) || access.Equals("arg", StringComparison.OrdinalIgnoreCase)) {
-                        return FindParam(context, name).ParameterType;
-                    } else if (access.Equals("var", StringComparison.OrdinalIgnoreCase)) {
-                        return FindVariable(context, name).VariableType;
-                    }
-                }
+                typeRef = FindTypeByMacro(context, typeName);
             }
 
-            typeRef = null;
-
-            foreach (var module in context.Modules) {
-                if (module.TryGetTypeReference(typeName, out typeRef)) {
-                    break;
-                }
+            if (typeRef == null) {
+                typeRef = FindTypeInModules(context, typeName);
             }
 
             if (typeRef == null) {
                 throw new InvalidILException("Unable to locate type with name '{0}'", typeName);
             }
 
+            while(pointerDepth-- > 0) {
+                typeRef = new Mono.Cecil.PointerType(typeRef);
+            }
+
+            if (pinned) {
+                typeRef = new PinnedType(typeRef);
+            }
+
             return context.Definition.Module.ImportReference(typeRef);
         }
 
+        static private TypeReference FindTypeInPrimitives(ModuleDefinition module, string typeName) {
+            switch (typeName) {
+                case "int64": {
+                    return module.TypeSystem.Int64;
+                }
+                case "int32": {
+                    return module.TypeSystem.Int32;
+                }
+                case "int16": {
+                    return module.TypeSystem.Int16;
+                }
+                case "int8": {
+                    return module.TypeSystem.SByte;
+                }
+                case "uint64": {
+                    return module.TypeSystem.UInt64;
+                }
+                case "uint32": {
+                    return module.TypeSystem.UInt32;
+                }
+                case "uint16": {
+                    return module.TypeSystem.UInt16;
+                }
+                case "uint8": {
+                    return module.TypeSystem.Byte;
+                }
+                case "bool": {
+                    return module.TypeSystem.Boolean;
+                }
+                case "float": {
+                    return module.TypeSystem.Single;
+                }
+                case "double": {
+                    return module.TypeSystem.Double;
+                }
+                case "string": {
+                    return module.TypeSystem.String;
+                }
+                case "char": {
+                    return module.TypeSystem.Char;
+                }
+                case "object": {
+                    return module.TypeSystem.Object;
+                }
+                case "void": {
+                    return module.TypeSystem.Void;
+                }
+                case "intptr": {
+                    return module.TypeSystem.IntPtr;
+                }
+                case "uintptr": {
+                    return module.TypeSystem.UIntPtr;
+                }
+                default: {
+                    return null;
+                }
+            }
+        }
+
+        static private TypeReference FindTypeInGenerics(IGenericParameterProvider provider, string typeName) {
+            if (provider.HasGenericParameters) {
+                foreach (var param in provider.GenericParameters) {
+                    if (param.Name.Equals(typeName, StringComparison.Ordinal)) {
+                        return param;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        static private TypeReference FindTypeInGenericsWithTraversal(MethodDefinition definition, string typeName) {
+            TypeReference typeRef = FindTypeInGenerics(definition, typeName);
+            if (typeRef == null) {
+                TypeDefinition declaringType = definition.DeclaringType;
+                while (declaringType != null && typeRef == null)
+                {
+                    typeRef = FindTypeInGenerics(definition, typeName);
+                    declaringType = declaringType.DeclaringType;
+                }
+
+                if (typeRef == null) {
+                    throw new InvalidILException("Unable to locate generic type with name '{0}'", typeName);
+                }
+            }
+            return typeRef;
+        }
+
+        static private TypeReference FindTypeByMacro(MethodContext context, string typeName) {
+            if (typeName.Equals("declaringType", StringComparison.OrdinalIgnoreCase)) {
+                return context.Definition.DeclaringType;
+            } else {
+                int spaceIdx = typeName.IndexOf(' ');
+                string access = typeName.Substring(0, spaceIdx).TrimEnd();
+                string name = typeName.Substring(spaceIdx + 1).TrimStart();
+                if (access.Equals("param", StringComparison.OrdinalIgnoreCase) || access.Equals("arg", StringComparison.OrdinalIgnoreCase)) {
+                    return FindParam(context, name).ParameterType;
+                } else if (access.Equals("var", StringComparison.OrdinalIgnoreCase)) {
+                    return FindVariable(context, name).VariableType;
+                }
+            }
+            
+            throw new InvalidILException("Unrecognized type macro '{0}'", typeName);
+        }
+
+        static private TypeReference FindTypeInModules(MethodContext context, string typeName) {
+            TypeReference typeRef;
+            foreach (var module in context.Modules) {
+                if (module.TryGetTypeReference(typeName, out typeRef)) {
+                    return typeRef;
+                }
+            }
+            return null;
+        }
+
+        #endregion // Type Resolve
+
         static private ParameterDefinition FindParam(MethodContext context, string paramName) {
             if (string.IsNullOrEmpty(paramName)) {
-                throw new ArgumentNullException("paramName");
+                throw new InvalidILException("Empty parameter name");
             }
 
             foreach (var param in context.Definition.Parameters) {
@@ -419,7 +486,7 @@ namespace TinyIL {
 
         static private VariableDefinition FindVariable(MethodContext context, string varName) {
             if (string.IsNullOrEmpty(varName)) {
-                throw new ArgumentNullException("varName");
+                throw new InvalidILException("Empty variable name");
             }
 
             int varIndex;
@@ -438,7 +505,7 @@ namespace TinyIL {
 
         static private Instruction FindLabel(MethodContext context, string labelName) {
             if (string.IsNullOrEmpty(labelName)) {
-                throw new ArgumentNullException("labelName");
+                throw new InvalidILException("Empty label name");
             }
 
             for(int i = 0; i < context.Labels.Count; i++) {
@@ -543,8 +610,49 @@ namespace TinyIL {
         }
 
         static private CallSite ParseCallSite(MethodContext context, string descriptor) {
-            // TODO: Implement
-            throw new NotImplementedException();
+            string convStr, sigStr;
+            int pipeChar = descriptor.IndexOf('|');
+            if (pipeChar >= 0) {
+                convStr = descriptor.Substring(0, pipeChar).TrimEnd();
+                sigStr = descriptor.Substring(pipeChar + 1).TrimStart();
+            } else {
+                convStr = null;
+                sigStr = descriptor;
+            }
+
+            MethodCallingConvention convention = MethodCallingConvention.Default;
+            if (!string.IsNullOrEmpty(convStr)) {
+                if (convStr.Equals("cdecl", StringComparison.OrdinalIgnoreCase)) {
+                    convention = MethodCallingConvention.C;
+                } else if (!Enum.TryParse(convStr, true, out convention)) {
+                    throw new InvalidILException("Unable to parse '{0}' into valid calling convention", convStr);
+                }
+            }
+
+            int argOpenIdx = sigStr.IndexOf('(');
+            int argCloseIdx = sigStr.LastIndexOf(')');
+
+            if (argOpenIdx < 0 || argCloseIdx < 0) {
+                throw new InvalidILException("Malformed method signature '{0}'", sigStr);
+            }
+
+            string paramList = sigStr.Substring(argOpenIdx + 1, argCloseIdx - argOpenIdx - 1);
+            TypeReference[] parameterTypes = ParseTypeList(context, paramList);
+
+            string returnTypeStr = sigStr.Substring(0, argOpenIdx).TrimEnd();
+            if (string.IsNullOrEmpty(returnTypeStr)) {
+                throw new InvalidILException("Malformed method signature '{0}'", sigStr);
+            }
+
+            TypeReference returnType = FindType(context, returnTypeStr);
+            CallSite site = new CallSite(returnType) { CallingConvention = convention };
+            if (convention == MethodCallingConvention.ThisCall) {
+                site.HasThis = true;
+            }
+            foreach(var paramType in parameterTypes) {
+                site.Parameters.Add(new ParameterDefinition(paramType));
+            }
+            return site;
         }
 
         static private string ParseUserString(MethodContext context, string stringVar) {
@@ -719,7 +827,7 @@ namespace TinyIL {
         static private readonly Dictionary<string, InstructionGenerator> OperandCommands = new Dictionary<string, InstructionGenerator>(StringComparer.OrdinalIgnoreCase) {
             { "box", (a, d) => { return Instruction.Create(OpCodes.Box, FindType(d, a)); } },
             { "call", (a, d) => { return Instruction.Create(OpCodes.Call, FindMethod(d, a)); } },
-            //{ "calli", (a, d) => { return Instruction.Create(OpCodes.Calli, ParseCallSite(d, a)); } },
+            { "calli", (a, d) => { return Instruction.Create(OpCodes.Calli, ParseCallSite(d, a)); } },
             { "callvirt", (a, d) => { return Instruction.Create(OpCodes.Callvirt, FindMethod(d, a)); } },
             { "castclass", (a, d) => { return Instruction.Create(OpCodes.Castclass, FindType(d, a)); } },
             { "constrained.", (a, d) => { return Instruction.Create(OpCodes.Constrained, FindType(d, a)); } },
@@ -809,6 +917,24 @@ namespace TinyIL {
         #region Utils
 
         /// <summary>
+        /// Opens an assembly for reading/writing.
+        /// </summary>
+        static public AssemblyDefinition OpenReadWrite(string assemblyPath, out bool debugSymbols) {
+            string pdbPath = Path.ChangeExtension(assemblyPath, "pdb");
+            if (File.Exists(pdbPath)) {
+                try {
+                    debugSymbols = true;
+                    return AssemblyDefinition.ReadAssembly(assemblyPath, new ReaderParameters() { ReadWrite = true, ReadSymbols = true, SymbolReaderProvider = new PdbReaderProvider() });
+                } catch (Exception e) {
+                    Console.WriteLine("Error when attempting to read debug symbols:\n{0}", e.ToString());
+                }
+            }
+
+            debugSymbols = false;
+            return AssemblyDefinition.ReadAssembly(assemblyPath, new ReaderParameters() { ReadWrite = true });
+        }
+
+        /// <summary>
         /// Adds assembly search directories.
         /// </summary>
         static public void AddAssemblySearchDirectories(AssemblyDefinition asmDef, IEnumerable<string> directories) {
@@ -855,30 +981,226 @@ namespace TinyIL {
 
         #endregion // Utils
 
-        #region Readers
+        #region Traversal
 
-        //private struct LineReader {
-        //    public string Line;
-        //    public int CurrentIndex;
+        /// <summary>
+        /// Traverses and modifies types in the given assembly.
+        /// </summary>
+        static public int TraverseTypesAndModify(AssemblyDefinition asmDef, Predicate<TypeDefinition> predicate, ProcessTypeDelegate modifyAction, ref PatchFileCache patchCache) {
+            if (asmDef == null) {
+                throw new ArgumentNullException("asmDef");
+            }
+            if (modifyAction == null) {
+                throw new ArgumentNullException("modifyAction");
+            }
 
-        //    public void Initialize(string line) {
-        //        Line = line;
-        //        CurrentIndex = 0;
-        //    }
+            int modifiedCount = 0;
+            HashSet<TypeDefinition> processed = new HashSet<TypeDefinition>();
+            Stack<TypeDefinition> types = new Stack<TypeDefinition>(asmDef.MainModule.Types);
+            while (types.Count > 0) {
+                var type = types.Pop();
+                processed.Add(type);
 
-        //    public void SkipWhitespace() {
-        //        while(CurrentIndex < Line.Length && char.IsWhiteSpace(Line[CurrentIndex])) {
-        //            CurrentIndex++;
-        //        }
-        //    }
+                if (type.FullName == "<Module>" || (predicate != null && !predicate(type))) {
+                    continue;
+                }
 
-        //    public bool IsEOL() {
-        //        return Line == null || CurrentIndex >= Line.Length;
-        //    }
-        //}
+                modifiedCount += modifyAction(type, ref patchCache);
 
-        #endregion // Readers
+                if (type.HasNestedTypes) {
+                    foreach (var nested in type.NestedTypes) {
+                        if (!processed.Contains(nested)) {
+                            types.Push(nested);
+                        }
+                    }
+                }
+            }
+            return modifiedCount;
+        }
+
+        /// <summary>
+        /// Traverses and modifies methods in the given assembly.
+        /// </summary>
+        static public int TraverseMethodsAndModify(AssemblyDefinition asmDef, Predicate<MethodDefinition> predicate, ProcessMethodDelegate modifyAction, ref PatchFileCache patchCache) {
+            if (asmDef == null) {
+                throw new ArgumentNullException("asmDef");
+            }
+            if (modifyAction == null) {
+                throw new ArgumentNullException("modifyAction");
+            }
+
+            int modifiedCount = 0;
+            HashSet<TypeDefinition> processed = new HashSet<TypeDefinition>();
+            Stack<TypeDefinition> types = new Stack<TypeDefinition>(asmDef.MainModule.Types);
+            while (types.Count > 0) {
+                var type = types.Pop();
+                processed.Add(type);
+
+                if (type.FullName == "<Module>" || !type.HasMethods) {
+                    continue;
+                }
+
+                foreach (var method in type.Methods) {
+                    if (predicate == null || predicate(method)) {
+                        if (modifyAction(method, ref patchCache)) {
+                            modifiedCount++;
+                        }
+                    }
+                }
+
+                if (type.HasNestedTypes) {
+                    foreach (var nested in type.NestedTypes) {
+                        if (!processed.Contains(nested)) {
+                            types.Push(nested);
+                        }
+                    }
+                }
+            }
+            return modifiedCount;
+        }
+
+        /// <summary>
+        /// Traverses and collects methods that pass a given predicate.
+        /// </summary>
+        static public int TraverseMethodsAndCollect(AssemblyDefinition asmDef, Predicate<MethodDefinition> predicate, ICollection<MethodDefinition> output) {
+            if (asmDef == null) {
+                throw new ArgumentNullException("asmDef");
+            }
+            if (predicate == null) {
+                throw new ArgumentNullException("predicate");
+            }
+            if (output == null) {
+                throw new ArgumentNullException("output");
+            }
+
+            int collectedCount = 0;
+            HashSet<TypeDefinition> processed = new HashSet<TypeDefinition>();
+            Stack<TypeDefinition> types = new Stack<TypeDefinition>(asmDef.MainModule.Types);
+            while (types.Count > 0) {
+                var type = types.Pop();
+                processed.Add(type);
+
+                if (type.FullName == "<Module>" || !type.HasMethods) {
+                    continue;
+                }
+
+                foreach (var method in type.Methods) {
+                    if (predicate == null || predicate(method)) {
+                        output.Add(method);
+                    }
+                }
+
+                if (type.HasNestedTypes) {
+                    foreach (var nested in type.NestedTypes) {
+                        if (!processed.Contains(nested)) {
+                            types.Push(nested);
+                        }
+                    }
+                }
+            }
+            return collectedCount;
+        }
+
+        #endregion // Traversal
     }
+
+    /// <summary>
+    /// Patch file cache utility.
+    /// </summary>
+    public struct PatchFileCache {
+        public PatchFileCache(string sourceDirectory) {
+            SearchDirectory = string.IsNullOrEmpty(sourceDirectory) ? "./" : sourceDirectory;
+            PatchMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+
+        internal string SearchDirectory;
+        internal Dictionary<string, string> PatchMap;
+
+        public string FindPatch(string fileAndPatchName) {
+            string patch;
+            if (PatchMap.TryGetValue(fileAndPatchName, out patch)) {
+                return patch;
+            }
+
+            string fileName, patchName;
+            int colonIdx = fileAndPatchName.IndexOf(':');
+            if (colonIdx <= 0) {
+                throw new ArgumentException(string.Format("Patch name '{0}' is not formatted properly - expecting format FILENAME:PATCHNAME", fileAndPatchName));
+            } else {
+                fileName = fileAndPatchName.Substring(0, colonIdx).Trim();
+                patchName = fileAndPatchName.Substring(colonIdx + 1).Trim();
+            }
+
+            if (TryReadPatchFile(SearchDirectory, fileName, PatchMap)) {
+                if (PatchMap.TryGetValue(fileAndPatchName, out patch)) {
+                    return patch;
+                }
+            }
+
+            throw new FileNotFoundException(string.Format("No patch found for file '{0}', name '{1}' from source directory '{2}'", fileName, patchName, SearchDirectory));
+        }
+
+        static internal bool TryReadPatchFile(string directory, string fileName, Dictionary<string, string> output) {
+            StringBuilder patchBuilder = new StringBuilder(2048);
+            string currentPatchKey = null;
+            bool modified = false;
+
+            foreach (var filePath in Directory.GetFiles(directory, fileName + ".ilpatch", SearchOption.AllDirectories)) {
+                using (FileStream stream = File.OpenRead(filePath))
+                using (StreamReader reader = new StreamReader(stream)) {
+                    while (!reader.EndOfStream) {
+                        string line = reader.ReadLine().TrimStart();
+                        if (string.IsNullOrEmpty(line)) {
+                            continue;
+                        }
+
+                        if (line.StartsWith("==")) {
+                            if (patchBuilder.Length > 0) {
+                                if (output.ContainsKey(currentPatchKey)) {
+                                    throw new InvalidOperationException(string.Format("Duplicate patches with key '{0}'", currentPatchKey));
+                                }
+
+                                Console.WriteLine("[TinyIL] Located patch '{0}'", currentPatchKey);
+                                output.Add(currentPatchKey, patchBuilder.ToString());
+                                patchBuilder.Length = 0;
+                                modified = true;
+                            }
+
+                            currentPatchKey = string.Concat(fileName, ":", line.Substring(2).Trim());
+                        } else if (line.StartsWith("//")) {
+                            // skip - it's a comment
+                        } else {
+                            if (string.IsNullOrEmpty(currentPatchKey)) {
+                                throw new InvalidOperationException("Invalid patch file format - patch contents must be preceded by '== PATCH_NAME'");
+                            }
+                            patchBuilder.Append(line).Append('\n');
+                        }
+                    }
+
+                    if (patchBuilder.Length > 0) {
+                        if (string.IsNullOrEmpty(currentPatchKey)) {
+                            throw new InvalidOperationException("Invalid patch file format - patch contents must be preceded by '== PATCH_NAME'");
+                        }
+
+                        if (output.ContainsKey(currentPatchKey)) {
+                            throw new InvalidOperationException(string.Format("Duplicate patches with key '{0}'", currentPatchKey));
+                        }
+
+                        Console.WriteLine("[TinyIL] Located patch '{0}'", currentPatchKey);
+                        output.Add(currentPatchKey, patchBuilder.ToString());
+                        patchBuilder.Length = 0;
+                        currentPatchKey = null;
+                        modified = true;
+                    }
+                }
+            }
+
+            return modified;
+        }
+    }
+
+    public delegate int ProcessTypeDelegate(TypeDefinition typeDef, ref PatchFileCache patchCache);
+    public delegate bool ProcessMethodDelegate(MethodDefinition methodDef, ref PatchFileCache patchCache);
 }
 
 #endif // UNITY_EDITOR

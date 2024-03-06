@@ -1,12 +1,14 @@
 {
     "name": "TinyIL.Mono",
+    "rootNamespace": "",
     "references": [],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": true,
     "overrideReferences": true,
     "precompiledReferences": [
-        "Mono.Cecil.dll"
+        "Mono.Cecil.dll",
+        "Mono.Cecil.Pdb.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],
