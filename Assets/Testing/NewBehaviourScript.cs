@@ -14,7 +14,7 @@ public class NewBehaviourScript : MonoBehaviour
         Debug.Log(loadState);
         Debug.Log(loadState.GetType().FullName);
         Debug.Log(GetGuid(gameObject.scene)); 
-        Debug.Log(ToInt(loadState));
+        Debug.Log(ToInt(loadState));  
 
         Debug.Log(FnvHash(gameObject.name).ToString("X8"));
         CallITest();
@@ -64,7 +64,7 @@ public class NewBehaviourScript : MonoBehaviour
     static private unsafe uint FnvHash(string str) {
         fixed(char* ptr = str) {
             return FnvHash32(ptr, str.Length);
-        }
+        } 
     }
 
     [IntrinsicIL("ldarga.s scene; call UnityEngine.SceneManagement.Scene::get_loadingState(); conv.i4; ret;")]

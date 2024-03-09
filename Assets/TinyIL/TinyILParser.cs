@@ -2,13 +2,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Pdb;
-using UnityEngine;
-using UnityEngine.XR;
 
 namespace TinyIL {
     static public class TinyILParser {
@@ -34,6 +33,11 @@ namespace TinyIL {
             public Instruction Placeholder;
         }
 
+        internal struct ConstantDefinition {
+            public string PrefixedName;
+            public string Value;
+        }
+
         /// <summary>
         /// Method generation context.
         /// </summary>
@@ -46,6 +50,7 @@ namespace TinyIL {
             internal readonly List<LabelDefinition> Labels;
             internal readonly List<LateBranchResolver> Branches;
             internal readonly List<ModuleDefinition> Modules;
+            internal readonly List<ConstantDefinition> Constants;
 
             public MethodContext(MethodDefinition definition) {
                 Definition = definition;
@@ -54,6 +59,7 @@ namespace TinyIL {
                 VarNames = new List<string>(8);
                 Labels = new List<LabelDefinition>(8);
                 Branches = new List<LateBranchResolver>(8);
+                Constants = new List<ConstantDefinition>(4);
                 Modules = new List<ModuleDefinition>(8);
                 Modules.Add(Definition.Module);
             }
@@ -102,12 +108,18 @@ namespace TinyIL {
 
             string op, operand;
             int spaceIdx = ilLine.IndexOf(' ');
-            if (spaceIdx >= 0) {
+            if (spaceIdx > 0) {
                 op = ilLine.Substring(0, spaceIdx).TrimEnd();
                 operand = ilLine.Substring(spaceIdx + 1).TrimStart();
             } else {
                 op = ilLine;
                 operand = null;
+            }
+
+            // if we have an operand, 
+            if (operand != null && operand.Length > 1 && operand[0] == '#' && (op.Length == 0 || op[0] != '#')) {
+                // replace with constant
+                operand = FindConstant(context, operand);
             }
 
             if (operand == null && op.EndsWith(":")) {
@@ -132,6 +144,19 @@ namespace TinyIL {
                     throw new InvalidILException("#asmref must have an assembly name");
                 }
                 ImportAssembly(context, operand);
+            } else if (op == "#const") {
+                if (string.IsNullOrEmpty(operand)) {
+                    throw new InvalidILException("#const must be in format [name] [value]");
+                }
+
+                int space = operand.IndexOf(' ');
+                if (space < 0) {
+                    throw new InvalidILException("#const must be in format [name] [value]");
+                }
+
+                string name = "#" + operand.Substring(0, space).Trim();
+                string value = operand.Substring(space + 1).Trim();
+                DefineConstant(context, name, value);
             } else if (NoOperandCommands.TryGetValue(op, out OpCode opcode)) {
                 if (!string.IsNullOrEmpty(operand)) {
                     throw new InvalidILException("opcode '{0}' does not support operands", op);
@@ -154,11 +179,11 @@ namespace TinyIL {
                 try {
                     Instruction inst = generator(operand, context);
                     context.Processor.Append(inst);
-                } catch(Exception e) {
+                } catch (Exception e) {
                     throw new InvalidILException(e, "unable to parse '{0}'", ilLine);
                 }
             } else {
-                throw new InvalidILException("Unrecognized or unsupported IL opcode '{0}'", op);
+                throw new InvalidILException("Unrecognized or unsupported IL operation '{0}'", ilLine);
             }
         }
 
@@ -265,6 +290,23 @@ namespace TinyIL {
             context.Labels.Add(new LabelDefinition() {
                 Label = labelName,
                 Index = context.Body.Instructions.Count
+            });
+        }
+
+        static private void DefineConstant(MethodContext context, string constantName, string constantValue) {
+            if (string.IsNullOrEmpty(constantName)) {
+                throw new ArgumentNullException("constantName");
+            }
+
+            for(int i = 0; i < context.Constants.Count; i++) {
+                if (context.Constants[i].PrefixedName.Equals(constantName, StringComparison.OrdinalIgnoreCase)) {
+                    throw new InvalidILException("Constant with name '{0}' already defined with value '{1}' in method '{2}'", constantName, context.Constants[i].Value, context.Definition.FullName);
+                }
+            }
+
+            context.Constants.Add(new ConstantDefinition() {
+                PrefixedName = constantName,
+                Value = constantValue
             });
         }
 
@@ -609,6 +651,20 @@ namespace TinyIL {
             throw new InvalidILException("No {0} field with name '{1}' found on type '{2}'", isStatic ? "static" : "instance", scopedFieldName, typeDef.FullName) ;
         }
 
+        static private string FindConstant(MethodContext context, string constantName) {
+            if (string.IsNullOrEmpty(constantName)) {
+                throw new InvalidILException("Empty constant name");
+            }
+
+            for (int i = 0; i < context.Constants.Count; i++) {
+                if (context.Constants[i].PrefixedName.Equals(constantName, StringComparison.OrdinalIgnoreCase)) {
+                    return context.Constants[i].Value;
+                }
+            }
+
+            throw new InvalidILException("No constant with name '{0}' found in method '{1}'", constantName, context.Definition.FullName);
+        }
+
         static private CallSite ParseCallSite(MethodContext context, string descriptor) {
             string convStr, sigStr;
             int pipeChar = descriptor.IndexOf('|');
@@ -839,11 +895,16 @@ namespace TinyIL {
             { "ldarg.s", (a, d) => { return Instruction.Create(OpCodes.Ldarg_S, FindParam(d, a)); } },
             { "ldarga", (a, d) => { return Instruction.Create(OpCodes.Ldarga, FindParam(d, a)); } },
             { "ldarga.s", (a, d) => { return Instruction.Create(OpCodes.Ldarga_S, FindParam(d, a)); } },
-            { "ldc.i4", (a, d) => { return Instruction.Create(OpCodes.Ldc_I4, Convert.ToInt32(a)); } },
-            { "ldc.i4.s", (a, d) => { return Instruction.Create(OpCodes.Ldc_I4_S, Convert.ToByte(a)); } },
-            { "ldc.i8", (a, d) => { return Instruction.Create(OpCodes.Ldc_I8, Convert.ToInt64(a)); } },
-            { "ldc.r4", (a, d) => { return Instruction.Create(OpCodes.Ldc_R4, Convert.ToSingle(a)); } },
-            { "ldc.r8", (a, d) => { return Instruction.Create(OpCodes.Ldc_R8, Convert.ToDouble(a)); } },
+            { "ldc.i4", (a, d) => { return Instruction.Create(OpCodes.Ldc_I4, ParseInt(a)); } },
+            { "ldc.i4.s", (a, d) => { return Instruction.Create(OpCodes.Ldc_I4_S, ParseSByte(a)); } },
+            { "ldc.i8", (a, d) => { return Instruction.Create(OpCodes.Ldc_I8, ParseLong(a)); } },
+            { "ldc.r4", (a, d) => { return Instruction.Create(OpCodes.Ldc_R4, float.Parse(a)); } },
+            { "ldc.r8", (a, d) => { return Instruction.Create(OpCodes.Ldc_R8, double.Parse(a)); } },
+            
+            // CUSTOM
+            { "ldc.u4", (a, d) => { return Instruction.Create(OpCodes.Ldc_I4, Cast<uint, int>(ParseUint(a))); } },
+            { "ldc.u8", (a, d) => { return Instruction.Create(OpCodes.Ldc_I8, Cast<ulong, long>(ParseUlong(a))); } },
+            
             { "ldelem", (a, d) => { return Instruction.Create(OpCodes.Ldelem_Any, FindType(d, a)); } },
             { "ldelema", (a, d) => { return Instruction.Create(OpCodes.Ldelema, FindType(d, a)); } },
             { "ldfld", (a, d) => { return Instruction.Create(OpCodes.Ldfld, FindField(d, a, false)); } },
@@ -857,7 +918,9 @@ namespace TinyIL {
             { "ldsflda", (a, d) => { return Instruction.Create(OpCodes.Ldsfld, FindField(d, a, true)); } },
             { "ldsfld", (a, d) => { return Instruction.Create(OpCodes.Ldsfld, FindField(d, a, true)); } },
             { "ldstr", (a, d) => { return Instruction.Create(OpCodes.Ldstr, ParseUserString(d, a)); } },
+
             //{ "ldtoken", (a, d) => { return Instruction.Create(OpCodes.Ldtoken, FindToken(d, a)); } },
+
             { "ldvirtfn", (a, d) => { return Instruction.Create(OpCodes.Ldvirtftn, FindMethod(d, a)); } },
             { "mkrefany", (a, d) => { return Instruction.Create(OpCodes.Mkrefany, FindType(d, a)); } },
             { "newarr", (a, d) => { return Instruction.Create(OpCodes.Newarr, FindType(d, a)); } },
@@ -872,7 +935,7 @@ namespace TinyIL {
             { "stloc.s", (a, d) => { return Instruction.Create(OpCodes.Stloc_S, FindVariable(d, a)); } },
             { "stobj", (a, d) => { return Instruction.Create(OpCodes.Stobj, FindType(d, a)); } },
             { "stsfld", (a, d) => { return Instruction.Create(OpCodes.Stsfld, FindField(d, a, true)); } },
-            { "unaligned.", (a, d) => { return Instruction.Create(OpCodes.Unaligned, Convert.ToByte(a)); } },
+            { "unaligned.", (a, d) => { return Instruction.Create(OpCodes.Unaligned, byte.Parse(a)); } },
             { "unaligned.1", (a, d) => { return Instruction.Create(OpCodes.Unaligned, (byte) 1); } },
             { "unaligned.2", (a, d) => { return Instruction.Create(OpCodes.Unaligned, (byte) 2); } },
             { "unaligned.4", (a, d) => { return Instruction.Create(OpCodes.Unaligned, (byte) 4); } },
@@ -978,6 +1041,78 @@ namespace TinyIL {
             attribute = null;
             return false;
         }
+
+        #region Parsing
+
+        static private sbyte ParseSByte(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return sbyte.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return sbyte.Parse(str);
+            }
+        }
+
+        static private byte ParseByte(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return byte.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return byte.Parse(str);
+            }
+        }
+
+        static private short ParseShort(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return short.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return short.Parse(str);
+            }
+        }
+
+        static private ushort ParseUShort(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return ushort.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return ushort.Parse(str);
+            }
+        }
+
+        static private int ParseInt(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return int.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return int.Parse(str);
+            }
+        }
+
+        static private uint ParseUint(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return uint.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return uint.Parse(str);
+            }
+        }
+
+        static private long ParseLong(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return long.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return long.Parse(str);
+            }
+        }
+
+        static private ulong ParseUlong(string str) {
+            if (str.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+                return ulong.Parse(str.Substring(2), NumberStyles.HexNumber);
+            } else {
+                return ulong.Parse(str);
+            }
+        }
+
+        static private unsafe TOut Cast<TIn, TOut>(TIn value) where TIn : unmanaged where TOut : unmanaged {
+            return *(TOut*) (&value);
+        }
+
+        #endregion // Parsing
 
         #endregion // Utils
 
@@ -1199,7 +1334,16 @@ namespace TinyIL {
         }
     }
 
+    /// <summary>
+    /// Delegate for processing and modifying a type.
+    /// </summary>
+    /// <returns>Number of members modified.</returns>
     public delegate int ProcessTypeDelegate(TypeDefinition typeDef, ref PatchFileCache patchCache);
+
+    /// <summary>
+    /// Delegate for processing and modifying a method.
+    /// </summary>
+    /// <returns>If the method was modified.</returns>
     public delegate bool ProcessMethodDelegate(MethodDefinition methodDef, ref PatchFileCache patchCache);
 }
 

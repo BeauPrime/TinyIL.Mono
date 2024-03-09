@@ -12,13 +12,16 @@ brfalse.s EARLY_EXIT
 #var length int32
 #var hash uint32
 
+#const BASIS 0x811C9DC5
+#const PRIME 16777619
+
 ldarg.0
 stloc.0
 
 ldarg.1
 stloc.1
 
-ldc.i4 -2128831035
+ldc.u4 #BASIS
 stloc.2
 
 LOOP:
@@ -27,7 +30,7 @@ dup
 ldind.i2
 ldloc.2
 xor
-ldc.i4 16777619
+ldc.i4 #PRIME
 conv.u4
 mul
 stloc.2
