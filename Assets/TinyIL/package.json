@@ -1,6 +1,6 @@
 {
   "name": "com.beauprime.tinyil-mono",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "displayName": "TinyIL.Mono",
   "description": "Lightweight code weaver and IL parser.",
   "unity": "2019.4",

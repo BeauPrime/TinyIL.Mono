@@ -1026,6 +1026,32 @@ namespace TinyIL {
         }
 
         /// <summary>
+        /// Adds an assembly search directory.
+        /// </summary>
+        static public void AddAssemblySearchDirectory(AssemblyDefinition asmDef, string directory) {
+            AddAssemblySearchDirectory(asmDef.MainModule.AssemblyResolver, directory);
+        }
+
+        /// <summary>
+        /// Adds an assembly search directory.
+        /// </summary>
+        static public void AddAssemblySearchDirectory(ModuleDefinition module, string directory) {
+            AddAssemblySearchDirectory(module.AssemblyResolver, directory);
+        }
+
+        /// <summary>
+        /// Adds an assembly search directory..
+        /// </summary>
+        static public void AddAssemblySearchDirectory(IAssemblyResolver resolver, string directory) {
+            BaseAssemblyResolver asmResolver = resolver as BaseAssemblyResolver;
+            if (asmResolver == null) {
+                throw new InvalidOperationException();
+            }
+
+            asmResolver.AddSearchDirectory(directory);
+        }
+
+        /// <summary>
         /// Finds the first custom attribute with the given type name.
         /// </summary>
         static public bool FindCustomAttribute(ICustomAttributeProvider provider, string attrName, out CustomAttribute attribute) {

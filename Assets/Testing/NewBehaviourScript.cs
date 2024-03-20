@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using TinyIL;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 public class NewBehaviourScript : MonoBehaviour
 {
@@ -70,6 +71,11 @@ public class NewBehaviourScript : MonoBehaviour
     [IntrinsicIL("ldarga.s scene; call UnityEngine.SceneManagement.Scene::get_loadingState(); conv.i4; ret;")]
     static private SceneLoadState GetLoadingState(Scene scene) {  
         throw new NotImplementedException();   
+    }
+
+    [IntrinsicIL("ldarg.0; call UnityEngine.UI.Selectable::get_currentSelectionState(); conv.i4; ret;")]
+    static private int GetSelectionState(Selectable selectable) {
+        throw new NotImplementedException();
     }
 
     [IntrinsicIL("ldarga.s scene; call UnityEngine.SceneManagement.Scene::get_guid(); ret;")]

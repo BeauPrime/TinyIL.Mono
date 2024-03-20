@@ -43,6 +43,7 @@ namespace TinyIL {
             try {
                 using (var asmDef = TinyILParser.OpenReadWrite(assemblyPath, out bool debugSymbols)) {
                     TinyILParser.AddAssemblySearchDirectories(asmDef, searchDirs);
+                    TinyILParser.AddAssemblySearchDirectory(asmDef, Path.GetDirectoryName(assemblyPath));
                     PatchFileCache patchCache = new PatchFileCache(sourceDirectory);
 
                     int modifiedCount = TinyILParser.TraverseMethodsAndModify(asmDef, null, CompileMethod, ref patchCache);
