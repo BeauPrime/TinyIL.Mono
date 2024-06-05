@@ -22,11 +22,11 @@ namespace TinyIL {
     /// <summary>
     /// IntrinsicIL attribute handler.
     /// </summary>
-    internal static class IntrinsicILHandler {
+    public static class IntrinsicILHandler {
         /// <summary>
         /// Handles intrinsic IL substitution.
         /// </summary>
-        static internal bool Process(MethodDefinition method, ref PatchFileCache patchCache) {
+        static public bool Process(MethodDefinition method, ref PatchFileCache patchCache) {
 
             if (TinyILParser.FindCustomAttribute(method, "IntrinsicILAttribute", out var intrinsicAttr)) {
                 string ilStr = intrinsicAttr.ConstructorArguments[0].Value.ToString();

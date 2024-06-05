@@ -21,11 +21,11 @@ namespace TinyIL {
     /// <summary>
     /// ExternalIL attribute handler.
     /// </summary>
-    internal static class ExternalILHandler {
+    public static class ExternalILHandler {
         /// <summary>
         /// Handles intrinsic IL substitution.
         /// </summary>
-        static internal bool Process(MethodDefinition method, ref PatchFileCache patchCache) {
+        static public bool Process(MethodDefinition method, ref PatchFileCache patchCache) {
 
             if (TinyILParser.FindCustomAttribute(method, "ExternalILAttribute", out var externalAttr)) {
                 string externalName = externalAttr.ConstructorArguments[0].Value.ToString();

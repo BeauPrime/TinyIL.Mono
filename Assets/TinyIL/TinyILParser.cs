@@ -998,6 +998,31 @@ namespace TinyIL {
         }
 
         /// <summary>
+        /// Opens an assembly for reading/writing.
+        /// </summary>
+        static public AssemblyDefinition OpenReadWrite(byte[] assemblyData, byte[] pdbData, out bool debugSymbols) {
+            ReaderParameters readerParams = new ReaderParameters() {
+                ReadWrite = true
+            };
+
+            if (pdbData != null && pdbData.Length > 0) {
+                try {
+                    debugSymbols = true;
+                    MemoryStream pdbStream = new MemoryStream(pdbData);
+                    readerParams.ReadSymbols = true;
+                    readerParams.SymbolStream = pdbStream;
+                    readerParams.SymbolReaderProvider = new PortablePdbReaderProvider();
+                    return AssemblyDefinition.ReadAssembly(new MemoryStream(assemblyData), readerParams);
+                } catch (Exception e) {
+                    Console.WriteLine("Error when attempting to read debug symbols:\n{0}", e.ToString());
+                }
+            }
+
+            debugSymbols = false;
+            return AssemblyDefinition.ReadAssembly(new MemoryStream(assemblyData), readerParams);
+        }
+
+        /// <summary>
         /// Adds assembly search directories.
         /// </summary>
         static public void AddAssemblySearchDirectories(AssemblyDefinition asmDef, IEnumerable<string> directories) {
@@ -1147,7 +1172,7 @@ namespace TinyIL {
         /// <summary>
         /// Traverses and modifies types in the given assembly.
         /// </summary>
-        static public int TraverseTypesAndModify(AssemblyDefinition asmDef, Predicate<TypeDefinition> predicate, ProcessTypeDelegate modifyAction, ref PatchFileCache patchCache) {
+        static public int TraverseTypesAndModify(AssemblyDefinition asmDef, Predicate<TypeDefinition> predicate, ProcessTypeDelegate modifyAction, ref PatchFileCache patchCache, object context) {
             if (asmDef == null) {
                 throw new ArgumentNullException("asmDef");
             }
@@ -1166,7 +1191,7 @@ namespace TinyIL {
                     continue;
                 }
 
-                modifiedCount += modifyAction(type, ref patchCache);
+                modifiedCount += modifyAction(type, ref patchCache, context);
 
                 if (type.HasNestedTypes) {
                     foreach (var nested in type.NestedTypes) {
@@ -1182,7 +1207,7 @@ namespace TinyIL {
         /// <summary>
         /// Traverses and modifies methods in the given assembly.
         /// </summary>
-        static public int TraverseMethodsAndModify(AssemblyDefinition asmDef, Predicate<MethodDefinition> predicate, ProcessMethodDelegate modifyAction, ref PatchFileCache patchCache) {
+        static public int TraverseMethodsAndModify(AssemblyDefinition asmDef, Predicate<MethodDefinition> predicate, ProcessMethodDelegate modifyAction, ref PatchFileCache patchCache, object context) {
             if (asmDef == null) {
                 throw new ArgumentNullException("asmDef");
             }
@@ -1203,7 +1228,7 @@ namespace TinyIL {
 
                 foreach (var method in type.Methods) {
                     if (predicate == null || predicate(method)) {
-                        if (modifyAction(method, ref patchCache)) {
+                        if (modifyAction(method, ref patchCache, context)) {
                             modifiedCount++;
                         }
                     }
@@ -1269,13 +1294,14 @@ namespace TinyIL {
     /// Patch file cache utility.
     /// </summary>
     public struct PatchFileCache {
+
+        internal string SearchDirectory;
+        internal Dictionary<string, string> PatchMap;
+
         public PatchFileCache(string sourceDirectory) {
             SearchDirectory = string.IsNullOrEmpty(sourceDirectory) ? "./" : sourceDirectory;
             PatchMap = new Dictionary<string, string>(StringComparer.Ordinal);
         }
-
-        internal string SearchDirectory;
-        internal Dictionary<string, string> PatchMap;
 
         public string FindPatch(string fileAndPatchName) {
             string patch;
@@ -1364,13 +1390,13 @@ namespace TinyIL {
     /// Delegate for processing and modifying a type.
     /// </summary>
     /// <returns>Number of members modified.</returns>
-    public delegate int ProcessTypeDelegate(TypeDefinition typeDef, ref PatchFileCache patchCache);
+    public delegate int ProcessTypeDelegate(TypeDefinition typeDef, ref PatchFileCache patchCache, object context);
 
     /// <summary>
     /// Delegate for processing and modifying a method.
     /// </summary>
     /// <returns>If the method was modified.</returns>
-    public delegate bool ProcessMethodDelegate(MethodDefinition methodDef, ref PatchFileCache patchCache);
+    public delegate bool ProcessMethodDelegate(MethodDefinition methodDef, ref PatchFileCache patchCache, object context);
 }
 
 #endif // UNITY_EDITOR

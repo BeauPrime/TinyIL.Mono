@@ -5,12 +5,26 @@ using TinyIL;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using UnityEngine.UIElements.Experimental;
+
+#if UNITY_EDITOR
+using UnityEditor.Build.Reporting;
+using UnityEditor.Build;
+using UnityEditor;
+using UnityEditorInternal;
+#endif // UNITY_EDITOR
 
 public class NewBehaviourScript : MonoBehaviour
 {
     // Start is called before the first frame update
     void Awake()
     {
+        if (IsTinyILCompiled()) {
+            Debug.Log("TinyIL compilation successful!");
+        } else { 
+            Debug.LogError("TinyIL compilation unsuccessful");
+        } 
+
         var loadState = GetLoadingState(gameObject.scene);
         Debug.Log(loadState);
         Debug.Log(loadState.GetType().FullName);
@@ -42,6 +56,11 @@ public class NewBehaviourScript : MonoBehaviour
         {
             throw new NotImplementedException();
         }
+    }
+
+    [IntrinsicIL("ldc.i4.1; ret;")]
+    static private bool IsTinyILCompiled() {
+        return false;
     }
 
     [ExternalIL("NewBehaviour:FNV_HASH")]
@@ -103,4 +122,19 @@ public class NewBehaviourScript : MonoBehaviour
             *(ptr++) = 0;
         }
     }
+
+#if UNITY_EDITOR
+
+    private class AssertTinyILHasRunBuildStep : IPreprocessBuildWithReport {
+        public int callbackOrder { get { return -10000; } }
+
+        public void OnPreprocessBuild(BuildReport report) {
+            if (!IsTinyILCompiled()) {
+                Debug.LogError("TinyIL compilation not ready!");
+                throw new BuildFailedException("TinyIL processing didn't run");
+            }
+        }
+    }
+
+#endif // UNITY_EDITOR
 }
