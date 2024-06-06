@@ -154,12 +154,24 @@ namespace TinyIL {
         }
 
         static private string GetSourcePath(string asmName) {
-            string asmDefPath = CompilationPipeline.GetAssemblyDefinitionFilePathFromAssemblyName(asmName);
+            string withoutExt = Path.GetFileNameWithoutExtension(asmName);
+
+            // search Assets
+            // search Library/PackageCache
+            string asmDefPath = FindAsmDef("Assets/", withoutExt) ?? FindAsmDef("Library/PackageCache", withoutExt);
             if (string.IsNullOrEmpty(asmDefPath)) {
                 return "Assets/";
             }
 
             return Path.GetDirectoryName(asmDefPath).Replace('\\', '/');
+        }
+
+        static private string FindAsmDef(string root, string fileName) {
+            var paths = Directory.GetFiles(root, fileName + ".asmdef", SearchOption.AllDirectories);
+            if (paths.Length > 0) {
+                return paths[0];
+            }
+            return null;
         }
 
         #endregion // Hooks
@@ -172,7 +184,7 @@ namespace TinyIL {
             }
 
             public override ILPostProcessResult Process(ICompiledAssembly compiledAssembly) {
-                return ProcessAssembly(compiledAssembly, "Assets/", GetAssemblyDirectories(compiledAssembly));
+                return ProcessAssembly(compiledAssembly, GetSourcePath(compiledAssembly.Name), GetAssemblyDirectories(compiledAssembly));
             }
 
             public override bool WillProcess(ICompiledAssembly compiledAssembly) {
